@@ -192,8 +192,10 @@ function updateProgress() {
     }
 }
 
+const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+
 async function checkUrl(url, index) {
-    // If in maintenance mode, skip the network check but effectively "complete" the step
+    // If in maintenance mode, skip the network check
     if (urlData[index].maintenance) {
         updateProgress();
         return;
@@ -204,52 +206,84 @@ async function checkUrl(url, index) {
     const timeCol = card.querySelector('.time-col');
     const lastCheckCol = card.querySelector('.last-check-col');
 
-    try {
-        const res = await fetch('/api/check', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
-        });
-        const data = await res.json();
+    // Visual reset
+    card.classList.remove('status-pending', 'status-online', 'status-offline');
 
-        // Double check if user toggled maintenance while waiting
+    const startTime = Date.now();
+
+    try {
+        let result = {};
+
+        if (isLocalhost) {
+            // LOCAL MODE: Use the smart Node.js proxy (Full features: Status codes, heavy lifting)
+            const res = await fetch('/api/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url })
+            });
+            result = await res.json();
+        } else {
+            // GITHUB PAGES / STATIC MODE: Direct Browser Fetch (Limited features)
+            // We use 'no-cors' to avoid CORS errors. 
+            // Limitation: We can't see the specific status code (it returns 0/opaque).
+            // Logic: If the promise resolves, the server is "Up" (DNS/Connection successful).
+            // If it rejects, it's a network error (Down).
+
+            // Note: Mixed Content (HTTP from HTTPS) will still fail on GitHub Pages.
+
+            await fetch(url, {
+                mode: 'no-cors',
+                cache: 'no-store',
+                method: 'GET'
+            });
+
+            // If we get here, it succeeded enough to connect
+            result = {
+                ok: true,
+                status: 200, // Fake 200 since we can't read the real one in no-cors
+                duration: Date.now() - startTime,
+                statusText: 'Reachable'
+            };
+        }
+
+        // Double check maintenance race condition
         if (urlData[index].maintenance) {
             updateProgress();
             return;
         }
 
-        // Safe Reset of classes
-        card.classList.remove('status-pending', 'status-online', 'status-offline');
-
         urlData[index].lastCheck = new Date();
-        urlData[index].latency = data.duration;
-        urlData[index].statusCode = data.status;
+        urlData[index].latency = result.duration;
+        urlData[index].statusCode = result.status;
 
-        if (data.ok) {
+        if (result.ok) {
             card.classList.add('status-online');
-            statusText.innerText = 'Operational';
+            statusText.innerText = isLocalhost ? 'Operational' : 'Reachable'; // Distinction for static mode
             urlData[index].status = 'online';
         } else {
-            card.classList.add('status-offline');
-            statusText.innerText = data.status ? `Error ${data.status}` : 'Unreachable';
-            urlData[index].status = 'offline';
+            throw new Error(result.error || 'Check failed');
         }
-
-        timeCol.innerText = `${data.duration}ms`;
-        lastCheckCol.innerText = urlData[index].lastCheck.toLocaleTimeString();
 
     } catch (err) {
         if (!urlData[index].maintenance) {
-            card.classList.remove('status-pending', 'status-online', 'status-offline');
             card.classList.add('status-offline');
-            statusText.innerText = 'Network Error';
+            // If static mode, errors are usually network/cors related, but effectively "Down" or "Blocked"
+            statusText.innerText = isLocalhost ? (err.message || 'Unreachable') : 'Unreachable / Blocked';
+
             urlData[index].status = 'offline';
+            urlData[index].latency = Date.now() - startTime;
+            urlData[index].statusCode = 0;
+            urlData[index].lastCheck = new Date();
         }
     }
 
+    // Update visuals
+    timeCol.innerText = `${urlData[index].latency}ms`;
+    lastCheckCol.innerText = urlData[index].lastCheck.toLocaleTimeString();
+
     recalcStats();
     updateProgress();
-    filterGrid(); // Re-apply filters as status changed
+    filterGrid();
 }
 
 function recalcStats() {
